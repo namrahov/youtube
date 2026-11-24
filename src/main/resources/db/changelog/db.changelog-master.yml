@@ -1,2 +1,5 @@
 # Schema changes are added as changes/NNN-*.sql files and included here, in order.
-databaseChangeLog: []
+databaseChangeLog:
+  - include:
+      file: changes/001-initial-schema.sql
+      relativeToChangelogFile: true
