@@ -24,9 +24,18 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-liquibase'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-kafka'
+    // S3 API: MinIO locally, AWS S3 in production. Multipart upload and presigned part URLs.
+    implementation platform('software.amazon.awssdk:bom:2.42.1')
+    implementation 'software.amazon.awssdk:s3'
     runtimeOnly 'org.postgresql:postgresql'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // Integration tests (*IT, run with ./gradlew integrationTest) start real PostgreSQL, Kafka and MinIO in Docker.
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    testImplementation 'org.testcontainers:testcontainers-kafka'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -44,7 +53,7 @@ tasks.named('test') {
 }
 
 tasks.register('integrationTest', Test) {
-    description = 'Runs integration tests (*IT).'
+    description = 'Runs integration tests (*IT) against PostgreSQL, Kafka and MinIO containers (needs Docker).'
     group = 'verification'
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
