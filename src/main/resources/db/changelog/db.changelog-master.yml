@@ -1,0 +1,2 @@
+# Schema changes are added as changes/NNN-*.sql files and included here, in order.
+databaseChangeLog: []

@@ -1,0 +1,6 @@
+# LF everywhere, whatever core.autocrlf is set to on the machine (avoids "LF will be replaced by CRLF" warnings
+# and line-ending-only diffs between Windows and Linux/macOS). Binary files are detected and left alone.
+* text=auto eol=lf
+
+/gradlew text eol=lf
+*.bat text eol=crlf
