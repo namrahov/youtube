@@ -1,10 +1,14 @@
 spring:
   application:
     name: youtube
+  config:
+    # Local secrets: KEY=value lines in .env in the working directory (gitignored, see .env.example).
+    # Environment variables still win, so production and CI set them as usual.
+    import: optional:file:.env[.properties]
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5433/youtube}
     username: ${DB_USERNAME:postgres}
-    # No default on purpose: set DB_PASSWORD in the IntelliJ run configuration or the terminal.
+    # No default on purpose: DB_PASSWORD comes from .env or the environment, never from this file.
     password: ${DB_PASSWORD}
     hikari:
       # 10 transcoding listener threads (4+3+2+1) can each hold a connection while the manifest is written,
