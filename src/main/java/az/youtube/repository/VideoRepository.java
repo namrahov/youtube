@@ -45,6 +45,15 @@ public interface VideoRepository extends JpaRepository<VideoEntity, Long> {
             """)
     int attachUploadId(@Param("id") long id, @Param("uploadId") String uploadId, @Param("now") Instant now);
 
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update VideoEntity v
+            set v.sourceWidth = :width, v.sourceHeight = :height, v.sourceDurationMs = :durationMs, v.updatedAt = :now
+            where v.id = :id
+            """)
+    int recordSource(@Param("id") long id, @Param("width") int width, @Param("height") int height,
+                     @Param("durationMs") long durationMs, @Param("now") Instant now);
+
     /** Sets the status derived from the variants; a null manifest key keeps the current one. */
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""

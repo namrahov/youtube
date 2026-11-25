@@ -4,6 +4,12 @@ import java.net.URI;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+/**
+ * @param createBucket  local convenience: create the bucket on startup
+ * @param publicStreams local convenience: allow anonymous GET under {@code streams/} so a player can fetch the
+ *                      playlists and segments straight from MinIO. In production the bucket stays private and only
+ *                      the CDN may read it (e.g. CloudFront origin access control)
+ */
 @ConfigurationProperties("youtube.storage")
 public record StorageProperties(
         URI endpoint,
@@ -12,5 +18,6 @@ public record StorageProperties(
         String accessKey,
         String secretKey,
         boolean pathStyleAccess,
-        boolean createBucket) {
+        boolean createBucket,
+        boolean publicStreams) {
 }

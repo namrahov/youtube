@@ -2,7 +2,11 @@ package az.youtube.storage;
 
 import az.youtube.config.StorageProperties;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
@@ -37,17 +41,33 @@ public class ObjectStorage implements InitializingBean {
         this.bucket = properties.bucket();
     }
 
-    /** Local convenience: creates the bucket before the workers start. Production buckets come from infrastructure. */
+    /**
+     * Local convenience: creates the bucket before the workers start and opens {@code streams/} to anonymous GET.
+     * Production buckets and their policies come from infrastructure.
+     */
     @Override
     public void afterPropertiesSet() {
-        if (!properties.createBucket()) {
-            return;
+        if (properties.createBucket()) {
+            try {
+                s3.headBucket(b -> b.bucket(bucket));
+            } catch (NoSuchBucketException e) {
+                s3.createBucket(b -> b.bucket(bucket));
+            }
         }
-        try {
-            s3.headBucket(b -> b.bucket(bucket));
-        } catch (NoSuchBucketException e) {
-            s3.createBucket(b -> b.bucket(bucket));
+        if (properties.publicStreams()) {
+            s3.putBucketPolicy(b -> b.bucket(bucket).policy(publicReadPolicy(StorageKeys.STREAMS_PREFIX)));
         }
+    }
+
+    /** GetObject for everyone, only under {@code prefix}: originals stay private. */
+    static String publicReadPolicy(String bucket, String prefix) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},\
+                "Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s*"]}]}""".formatted(bucket, prefix);
+    }
+
+    private String publicReadPolicy(String prefix) {
+        return publicReadPolicy(bucket, prefix);
     }
 
     /** @return the S3 uploadId that every part upload and the final complete/abort refer to */
@@ -103,6 +123,29 @@ public class ObjectStorage implements InitializingBean {
             }
             throw e;
         }
+    }
+
+    /** A URL that reads the object for {@code ttl}: lets ffprobe read just the headers it needs over HTTP. */
+    public URL presignGet(String key, Duration ttl) {
+        return presigner.presignGetObject(p -> p
+                        .signatureDuration(ttl)
+                        .getObjectRequest(r -> r.bucket(bucket).key(key)))
+                .url();
+    }
+
+    /** Streams the object to {@code target}, replacing it if it exists. */
+    public void download(String key, Path target) {
+        try {
+            Files.deleteIfExists(target);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        s3.getObject(b -> b.bucket(bucket).key(key), target);
+    }
+
+    public void putFile(String key, Path file, String contentType, String cacheControl) {
+        s3.putObject(b -> b.bucket(bucket).key(key).contentType(contentType).cacheControl(cacheControl),
+                RequestBody.fromFile(file));
     }
 
     public void putText(String key, String content, String contentType, String cacheControl) {

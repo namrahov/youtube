@@ -4,6 +4,7 @@ import static az.youtube.entity.VariantStatus.COMPLETED;
 import static az.youtube.entity.VariantStatus.FAILED;
 import static az.youtube.entity.VariantStatus.PENDING;
 import static az.youtube.entity.VariantStatus.PROCESSING;
+import static az.youtube.entity.VariantStatus.SKIPPED;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import az.youtube.entity.VideoStatus;
@@ -47,6 +48,20 @@ class VideoStatusCalculatorTest {
     @Test
     void everyVariantFailedIsProcessingFailed() {
         assertThat(VideoStatusCalculator.derive(List.of(FAILED, FAILED, FAILED, FAILED)))
+                .isEqualTo(VideoStatus.PROCESSING_FAILED);
+    }
+
+    @Test
+    void skippedRenditionsAreNotRequiredForFullyProcessed() {
+        assertThat(VideoStatusCalculator.derive(List.of(COMPLETED, COMPLETED, SKIPPED, SKIPPED)))
+                .isEqualTo(VideoStatus.FULLY_PROCESSED);
+    }
+
+    @Test
+    void skippedRenditionsDoNotMakeAVideoPlayable() {
+        assertThat(VideoStatusCalculator.derive(List.of(PROCESSING, SKIPPED, SKIPPED, SKIPPED)))
+                .isEqualTo(VideoStatus.PROCESSING);
+        assertThat(VideoStatusCalculator.derive(List.of(FAILED, SKIPPED, SKIPPED, SKIPPED)))
                 .isEqualTo(VideoStatus.PROCESSING_FAILED);
     }
 

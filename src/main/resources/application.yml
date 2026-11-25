@@ -53,6 +53,12 @@ youtube:
     path-style-access: ${S3_PATH_STYLE_ACCESS:true}
     # Local convenience: create the bucket on startup. In production the bucket is provisioned by infrastructure.
     create-bucket: ${S3_CREATE_BUCKET:true}
+    # Local convenience: anyone may GET under streams/ (playlists and segments; originals/ stays private), so a
+    # player can stream straight from MinIO. In production the bucket is private and only the CDN reads it.
+    public-streams: ${S3_PUBLIC_STREAMS:true}
+  playback:
+    # Base of the playback URLs the API returns: the CDN domain in production, the MinIO bucket locally.
+    base-url: ${PLAYBACK_BASE_URL:http://localhost:9010/youtube-videos}
   upload:
     # 2 GB / 64 MB = 32 parts. A failed part is retried alone; S3 allows at most 10 000 parts per upload.
     part-size: ${UPLOAD_PART_SIZE:64MB}
@@ -63,7 +69,10 @@ youtube:
     upload-ttl: ${UPLOAD_TTL:24h}
     expiry-sweep-interval-ms: ${UPLOAD_EXPIRY_SWEEP_INTERVAL_MS:600000}
   transcoding:
-    # Every video gets one job per resolution; FULLY_PROCESSED means all of them COMPLETED.
+    # ffmpeg: real HLS renditions (needs ffmpeg and ffprobe). simulated: waits and writes empty playlists.
+    engine: ${TRANSCODING_ENGINE:ffmpeg}
+    # The bitrate ladder. Renditions larger than the source are SKIPPED (no upscaling); the lowest is always made.
+    # FULLY_PROCESSED means every rendition that was not skipped COMPLETED.
     resolutions: ${TRANSCODING_RESOLUTIONS:P360,P720,P1080,P2160}
     # Retries of a failed job before its variant is marked FAILED (playback goes on with the other variants).
     max-retries: ${TRANSCODING_MAX_RETRIES:3}
@@ -75,7 +84,26 @@ youtube:
       p720: ${TRANSCODING_CONCURRENCY_720P:3}
       p1080: ${TRANSCODING_CONCURRENCY_1080P:2}
       p2160: ${TRANSCODING_CONCURRENCY_2160P:1}
-    # No ffmpeg in this project yet: the simulated transcoder waits this long and writes a placeholder playlist.
+    # An encode running longer is killed and retried. Plus transfer-allowance (download + upload), this is the
+    # pool's Kafka max.poll.interval.ms, so a running job is never handed to a second worker.
+    job-timeout:
+      P360: ${TRANSCODING_TIMEOUT_360P:30m}
+      P720: ${TRANSCODING_TIMEOUT_720P:45m}
+      P1080: ${TRANSCODING_TIMEOUT_1080P:1h}
+      P2160: ${TRANSCODING_TIMEOUT_2160P:3h}
+    transfer-allowance: ${TRANSCODING_TRANSFER_ALLOWANCE:15m}
+    ffmpeg:
+      ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+      ffprobe-path: ${FFPROBE_PATH:ffprobe}
+      # x264 speed/size trade-off. veryfast keeps local runs short; production would use slow or medium.
+      preset: ${FFMPEG_PRESET:veryfast}
+      # 4 s segments, a keyframe every 2 s in every rendition: segment boundaries line up across renditions,
+      # so the player can switch quality at any segment.
+      segment-duration: ${HLS_SEGMENT_DURATION:4s}
+      keyframe-interval: ${HLS_KEYFRAME_INTERVAL:2s}
+      probe-timeout: ${FFPROBE_TIMEOUT:1m}
+      work-dir: ${TRANSCODING_WORK_DIR:${java.io.tmpdir}/youtube-transcode}
+    # Simulated engine only: how long a job pretends to encode.
     simulated-duration:
       P360: ${TRANSCODING_SIMULATED_360P:2s}
       P720: ${TRANSCODING_SIMULATED_720P:4s}

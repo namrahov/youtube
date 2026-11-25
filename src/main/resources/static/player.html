@@ -1,0 +1,130 @@
+<!doctype html>
+<!--
+  Local demo of adaptive bitrate playback (PDF section 5). The backend only returns the master playlist URL;
+  hls.js does the rest: it measures segment download speed and buffer health and picks the rendition for the
+  next segment. Throttle the network in the browser's DevTools to watch it step down from 1080p to 360p.
+  Open http://localhost:8082/player.html
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HLS Player</title>
+    <style>
+        :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --line: #ddd; --accent: #c00; }
+        @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; --line: #333; --accent: #f55; } }
+        body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+        main { max-width: 960px; margin: 0 auto; }
+        form, .levels { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+        input { width: 110px; padding: 6px; }
+        button { padding: 6px 12px; cursor: pointer; }
+        button.active { border-color: var(--accent); color: var(--accent); }
+        video { width: 100%; background: #000; aspect-ratio: 16 / 9; }
+        table { border-collapse: collapse; margin: 12px 0; }
+        td, th { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+        #stats { font-family: ui-monospace, monospace; }
+        #log { font-family: ui-monospace, monospace; color: var(--muted); max-height: 200px; overflow: auto; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>HLS adaptive bitrate demo</h1>
+    <form id="form">
+        <label>Video id <input id="videoId" type="number" min="1" required></label>
+        <label>X-User-Id <input id="userId" type="number" min="1" value="1" required></label>
+        <button type="submit">Load</button>
+    </form>
+    <video id="video" controls muted playsinline></video>
+    <div class="levels" id="levels"></div>
+    <div id="stats"></div>
+    <table id="variants" hidden><thead><tr><th>Rendition</th><th>Status</th><th>Size</th></tr></thead><tbody></tbody></table>
+    <div id="log"></div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
+<script>
+    const $ = id => document.getElementById(id);
+    const video = $('video');
+    let hls;
+
+    function log(message) {
+        $('log').textContent = new Date().toLocaleTimeString() + '  ' + message + '\n' + $('log').textContent;
+    }
+
+    $('form').addEventListener('submit', async event => {
+        event.preventDefault();
+        const response = await fetch('/api/videos/' + $('videoId').value, {headers: {'X-User-Id': $('userId').value}});
+        if (!response.ok) {
+            log('GET /api/videos failed: ' + response.status);
+            return;
+        }
+        const info = await response.json();
+        const rows = info.variants.map(v => '<tr><td>' + v.resolution + '</td><td>' + v.status + '</td><td>'
+            + (v.width ? v.width + '×' + v.height : '') + '</td></tr>').join('');
+        $('variants').querySelector('tbody').innerHTML = rows;
+        $('variants').hidden = false;
+        log('Video ' + info.id + ' is ' + info.status);
+        if (!info.playbackUrl) {
+            log('Not playable yet');
+            return;
+        }
+        play(info.playbackUrl);
+    });
+
+    function play(url) {
+        if (hls) {
+            hls.destroy();
+        }
+        if (!window.Hls || !Hls.isSupported()) {
+            // Safari plays HLS natively and runs its own ABR.
+            video.src = url;
+            video.play();
+            return;
+        }
+        // Start low: the first segment arrives fast (startup time), then ABR steps up as bandwidth allows.
+        hls = new Hls({startLevel: 0});
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+            log('Master playlist: ' + data.levels.map(l => l.height + 'p @ ' + Math.round(l.bitrate / 1000) + ' kbit/s').join(', '));
+            renderLevelButtons();
+            video.play();
+        });
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+            const level = hls.levels[data.level];
+            log('Switched to ' + level.height + 'p (' + Math.round(level.bitrate / 1000) + ' kbit/s)');
+            renderLevelButtons();
+        });
+        hls.on(Hls.Events.ERROR, (_, data) => log('Error: ' + data.details + (data.fatal ? ' (fatal)' : '')));
+    }
+
+    function renderLevelButtons() {
+        const auto = hls.autoLevelEnabled;
+        const buttons = [['Auto', -1, auto]].concat(hls.levels.map((l, i) => [l.height + 'p', i, !auto && hls.currentLevel === i]));
+        $('levels').innerHTML = '';
+        for (const [label, index, active] of buttons) {
+            const button = document.createElement('button');
+            button.textContent = label;
+            button.className = active ? 'active' : '';
+            button.onclick = () => { hls.currentLevel = index; renderLevelButtons(); };
+            $('levels').appendChild(button);
+        }
+    }
+
+    setInterval(() => {
+        if (!hls || hls.currentLevel < 0 || !hls.levels[hls.currentLevel]) {
+            return;
+        }
+        const level = hls.levels[hls.currentLevel];
+        let buffered = 0;
+        for (let i = 0; i < video.buffered.length; i++) {
+            if (video.buffered.start(i) <= video.currentTime && video.currentTime <= video.buffered.end(i)) {
+                buffered = video.buffered.end(i) - video.currentTime;
+            }
+        }
+        $('stats').textContent = 'playing ' + level.width + '×' + level.height
+            + ' | estimated bandwidth ' + Math.round(hls.bandwidthEstimate / 1000) + ' kbit/s'
+            + ' | buffer ahead ' + buffered.toFixed(1) + ' s';
+    }, 500);
+</script>
+</body>
+</html>

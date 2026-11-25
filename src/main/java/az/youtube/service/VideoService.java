@@ -1,5 +1,6 @@
 package az.youtube.service;
 
+import az.youtube.config.PlaybackProperties;
 import az.youtube.dto.response.VideoResponse;
 import az.youtube.entity.VideoEntity;
 import az.youtube.repository.VariantRepository;
@@ -15,10 +16,12 @@ public class VideoService {
 
     private final VideoRepository videos;
     private final VariantRepository variants;
+    private final PlaybackProperties playback;
 
-    public VideoService(VideoRepository videos, VariantRepository variants) {
+    public VideoService(VideoRepository videos, VariantRepository variants, PlaybackProperties playback) {
         this.videos = videos;
         this.variants = variants;
+        this.playback = playback;
     }
 
     /** The owner sees the video in every state; other users only once it is playable. */
@@ -32,9 +35,11 @@ public class VideoService {
 
     VideoResponse toResponse(VideoEntity video) {
         var variantList = variants.findByVideo(video.getId()).stream()
-                .map(v -> new VideoResponse.Variant(v.resolution().label(), v.status()))
+                .map(v -> new VideoResponse.Variant(v.resolution().label(), v.status(), v.width(), v.height()))
                 .toList();
+        String manifestKey = video.getStatus().isPlayable() ? video.getManifestS3Key() : null;
         return new VideoResponse(video.getId(), video.getTitle(), video.getStatus(), video.getSizeBytes(),
-                video.getStatus().isPlayable() ? video.getManifestS3Key() : null, variantList, video.getCreatedAt());
+                manifestKey, manifestKey == null ? null : playback.urlOf(manifestKey), variantList,
+                video.getCreatedAt());
     }
 }

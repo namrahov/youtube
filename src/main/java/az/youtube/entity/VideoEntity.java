@@ -57,6 +57,16 @@ public class VideoEntity implements Persistable<Long> {
     @Column(name = "manifest_s3_key", length = 500)
     private String manifestS3Key;
 
+    /** Displayed size and duration found by ffprobe; null if the source was not probed. */
+    @Column(name = "source_width")
+    private Integer sourceWidth;
+
+    @Column(name = "source_height")
+    private Integer sourceHeight;
+
+    @Column(name = "source_duration_ms")
+    private Long sourceDurationMs;
+
     @Column(name = "upload_expires_at", nullable = false)
     private Instant uploadExpiresAt;
 
@@ -151,6 +161,18 @@ public class VideoEntity implements Persistable<Long> {
 
     public String getManifestS3Key() {
         return manifestS3Key;
+    }
+
+    public Integer getSourceWidth() {
+        return sourceWidth;
+    }
+
+    public Integer getSourceHeight() {
+        return sourceHeight;
+    }
+
+    public Long getSourceDurationMs() {
+        return sourceDurationMs;
     }
 
     public Instant getUploadExpiresAt() {
