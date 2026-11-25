@@ -1,8 +1,9 @@
 <!doctype html>
 <!--
-  Local demo of adaptive bitrate playback (PDF section 5). The backend only returns the master playlist URL;
-  hls.js does the rest: it measures segment download speed and buffer health and picks the rendition for the
-  next segment. Throttle the network in the browser's DevTools to watch it step down from 1080p to 360p.
+  Local demo client: search, adaptive bitrate playback (PDF section 5), view counting and playback metrics.
+  The backend returns the master playlist URL (through the CDN); hls.js measures segment download speed and buffer
+  health and picks the rendition of each next segment. Throttle the network in DevTools to watch it step down.
+  The player also reports what only it can measure: time to first frame and stalls (PDF section 9).
   Open http://localhost:8082/player.html
 -->
 <html lang="en">
@@ -16,19 +17,29 @@
         body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
         main { max-width: 960px; margin: 0 auto; }
         form, .levels { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-        input { width: 110px; padding: 6px; }
+        input { padding: 6px; }
+        input[type=number] { width: 110px; }
+        input[type=search] { flex: 1; min-width: 200px; }
         button { padding: 6px 12px; cursor: pointer; }
         button.active { border-color: var(--accent); color: var(--accent); }
         video { width: 100%; background: #000; aspect-ratio: 16 / 9; }
         table { border-collapse: collapse; margin: 12px 0; }
         td, th { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+        #results { list-style: none; padding: 0; margin: 0 0 12px; }
+        #results li { padding: 6px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+        #results small, #stats, #log { color: var(--muted); }
         #stats { font-family: ui-monospace, monospace; }
-        #log { font-family: ui-monospace, monospace; color: var(--muted); max-height: 200px; overflow: auto; white-space: pre-wrap; }
+        #log { font-family: ui-monospace, monospace; max-height: 200px; overflow: auto; white-space: pre-wrap; }
     </style>
 </head>
 <body>
 <main>
-    <h1>HLS adaptive bitrate demo</h1>
+    <h1>YouTube demo player</h1>
+    <form id="searchForm">
+        <input id="query" type="search" placeholder="Search videos (typos and prefixes work)">
+        <button type="submit">Search</button>
+    </form>
+    <ul id="results"></ul>
     <form id="form">
         <label>Video id <input id="videoId" type="number" min="1" required></label>
         <label>X-User-Id <input id="userId" type="number" min="1" value="1" required></label>
@@ -37,6 +48,7 @@
     <video id="video" controls muted playsinline></video>
     <div class="levels" id="levels"></div>
     <div id="stats"></div>
+    <p id="info"></p>
     <table id="variants" hidden><thead><tr><th>Rendition</th><th>Status</th><th>Size</th></tr></thead><tbody></tbody></table>
     <div id="log"></div>
 </main>
@@ -44,29 +56,56 @@
 <script>
     const $ = id => document.getElementById(id);
     const video = $('video');
+    const MIN_WATCH_SECONDS = 30;
     let hls;
+    let session = null;
 
     function log(message) {
         $('log').textContent = new Date().toLocaleTimeString() + '  ' + message + '\n' + $('log').textContent;
     }
 
+    const userHeaders = () => ({'X-User-Id': $('userId').value, 'Content-Type': 'application/json'});
+
+    // --- Search -------------------------------------------------------------------------------------------------
+    $('searchForm').addEventListener('submit', async event => {
+        event.preventDefault();
+        const response = await fetch('/api/search?q=' + encodeURIComponent($('query').value));
+        if (!response.ok) {
+            log('Search failed: ' + response.status);
+            return;
+        }
+        const result = await response.json();
+        $('results').innerHTML = '';
+        for (const hit of result.results) {
+            const item = document.createElement('li');
+            item.innerHTML = '<strong></strong> <small></small>';
+            item.querySelector('strong').textContent = hit.title;
+            item.querySelector('small').textContent = '#' + hit.id + ' · ' + hit.viewCount + ' views';
+            item.onclick = () => { $('videoId').value = hit.id; $('form').requestSubmit(); };
+            $('results').appendChild(item);
+        }
+        log('Search "' + $('query').value + '": ' + result.total + ' result(s)');
+    });
+
+    // --- Load and play ------------------------------------------------------------------------------------------
     $('form').addEventListener('submit', async event => {
         event.preventDefault();
-        const response = await fetch('/api/videos/' + $('videoId').value, {headers: {'X-User-Id': $('userId').value}});
+        endSession();
+        const response = await fetch('/api/videos/' + $('videoId').value, {headers: userHeaders()});
         if (!response.ok) {
             log('GET /api/videos failed: ' + response.status);
             return;
         }
         const info = await response.json();
-        const rows = info.variants.map(v => '<tr><td>' + v.resolution + '</td><td>' + v.status + '</td><td>'
-            + (v.width ? v.width + '×' + v.height : '') + '</td></tr>').join('');
-        $('variants').querySelector('tbody').innerHTML = rows;
+        $('info').textContent = info.title + ' · ' + info.viewCount + ' views · ' + info.status;
+        $('variants').querySelector('tbody').innerHTML = info.variants.map(v => '<tr><td>' + v.resolution + '</td><td>'
+            + v.status + '</td><td>' + (v.width ? v.width + '×' + v.height : '') + '</td></tr>').join('');
         $('variants').hidden = false;
-        log('Video ' + info.id + ' is ' + info.status);
         if (!info.playbackUrl) {
             log('Not playable yet');
             return;
         }
+        startSession(info.id);
         play(info.playbackUrl);
     });
 
@@ -75,8 +114,7 @@
             hls.destroy();
         }
         if (!window.Hls || !Hls.isSupported()) {
-            // Safari plays HLS natively and runs its own ABR.
-            video.src = url;
+            video.src = url; // Safari: native HLS with its own ABR
             video.play();
             return;
         }
@@ -110,6 +148,74 @@
         }
     }
 
+    // --- Session: startup time, stalls, view counting -----------------------------------------------------------
+    function startSession(videoId) {
+        session = {videoId, loadedAt: performance.now(), started: false, watchedMs: 0, stalledMs: 0, stalls: 0,
+                   stallSince: null, lastTick: null, viewEventId: crypto.randomUUID(), viewSent: false};
+    }
+
+    video.addEventListener('playing', () => {
+        if (!session) return;
+        const now = performance.now();
+        if (!session.started) {
+            session.started = true;
+            report({videoId: session.videoId, startupMs: Math.round(now - session.loadedAt)});
+            log('First frame after ' + Math.round(now - session.loadedAt) + ' ms');
+        } else if (session.stallSince !== null) {
+            session.stalledMs += now - session.stallSince;
+        }
+        session.stallSince = null;
+        session.lastTick = now;
+    });
+
+    // "waiting" after playback started = the buffer ran dry: a rebuffering stall.
+    video.addEventListener('waiting', () => {
+        if (session && session.started && session.stallSince === null) {
+            session.stalls++;
+            session.stallSince = performance.now();
+            log('Stalled (rebuffering)');
+        }
+    });
+
+    video.addEventListener('timeupdate', () => {
+        if (!session || video.paused || session.stallSince !== null) return;
+        const now = performance.now();
+        if (session.lastTick !== null) session.watchedMs += Math.min(now - session.lastTick, 1000);
+        session.lastTick = now;
+        const required = Math.min(MIN_WATCH_SECONDS, Math.floor(video.duration || MIN_WATCH_SECONDS));
+        if (!session.viewSent && session.watchedMs / 1000 >= required) {
+            session.viewSent = true;
+            countView(session.videoId, session.viewEventId, Math.floor(session.watchedMs / 1000));
+        }
+    });
+
+    video.addEventListener('pause', () => { if (session) session.lastTick = null; });
+
+    /** The same eventId on a retry: the server counts it once. */
+    async function countView(videoId, eventId, watchedSeconds, attempt = 1) {
+        const response = await fetch('/api/videos/' + videoId + '/views', {method: 'POST', headers: userHeaders(),
+            body: JSON.stringify({eventId, watchedSeconds})});
+        if (response.status === 503 && attempt < 3) {
+            setTimeout(() => countView(videoId, eventId, watchedSeconds, attempt + 1), 1000 * attempt);
+            return;
+        }
+        log('View reported: ' + response.status);
+    }
+
+    function report(body) {
+        navigator.sendBeacon('/api/playback/reports', new Blob([JSON.stringify(body)], {type: 'application/json'}));
+    }
+
+    function endSession() {
+        if (session && session.started) {
+            report({videoId: session.videoId, watchedMs: Math.round(session.watchedMs),
+                    stalledMs: Math.round(session.stalledMs), stalls: session.stalls});
+        }
+        session = null;
+    }
+
+    window.addEventListener('pagehide', endSession);
+
     setInterval(() => {
         if (!hls || hls.currentLevel < 0 || !hls.levels[hls.currentLevel]) {
             return;
@@ -123,7 +229,8 @@
         }
         $('stats').textContent = 'playing ' + level.width + '×' + level.height
             + ' | estimated bandwidth ' + Math.round(hls.bandwidthEstimate / 1000) + ' kbit/s'
-            + ' | buffer ahead ' + buffered.toFixed(1) + ' s';
+            + ' | buffer ahead ' + buffered.toFixed(1) + ' s'
+            + (session ? ' | watched ' + Math.round(session.watchedMs / 1000) + ' s, stalls ' + session.stalls : '');
     }, 500);
 </script>
 </body>

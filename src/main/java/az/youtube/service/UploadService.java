@@ -11,6 +11,7 @@ import az.youtube.dto.response.VideoResponse;
 import az.youtube.entity.VideoEntity;
 import az.youtube.entity.VideoStatus;
 import az.youtube.messaging.Topics;
+import az.youtube.metrics.AppMetrics;
 import az.youtube.repository.VideoRepository;
 import az.youtube.storage.ObjectStorage;
 import az.youtube.storage.ObjectStorage.UploadedPart;
@@ -51,15 +52,18 @@ public class UploadService {
     private final VideoService videoService;
     private final UploadProperties properties;
     private final TransactionTemplate tx;
+    private final AppMetrics metrics;
 
     public UploadService(VideoRepository videos, ObjectStorage storage, OutboxService outbox,
-                         VideoService videoService, UploadProperties properties, TransactionTemplate tx) {
+                         VideoService videoService, UploadProperties properties, TransactionTemplate tx,
+                         AppMetrics metrics) {
         this.videos = videos;
         this.storage = storage;
         this.outbox = outbox;
         this.videoService = videoService;
         this.properties = properties;
         this.tx = tx;
+        this.metrics = metrics;
     }
 
     public InitiateUploadResponse initiate(long userId, InitiateUploadRequest request) {
@@ -83,7 +87,7 @@ public class UploadService {
         });
         long videoId = video.getId();
 
-        // 2. Then the S3 multipart upload. The key is ours (videos/{id}/original), never chosen by the client.
+        // 2. Then the S3 multipart upload. The key is ours (originals/{id}), never chosen by the client.
         String uploadId;
         try {
             uploadId = storage.createMultipartUpload(video.getOriginalS3Key(), request.contentType());
@@ -95,6 +99,7 @@ public class UploadService {
             storage.abortMultipartUpload(video.getOriginalS3Key(), uploadId);
             throw conflict("Upload is no longer open");
         }
+        metrics.upload("initiated");
         return new InitiateUploadResponse(videoId, VideoStatus.UPLOADING, plan.partSizeBytes(), plan.partCount(),
                 video.getUploadExpiresAt());
     }
@@ -176,17 +181,23 @@ public class UploadService {
         if (stored.getAsLong() != video.getSizeBytes()) {
             storage.delete(key);
             markUploadFailed(videoId);
+            metrics.upload("rejected");
             throw badRequest("Stored size " + stored.getAsLong() + " does not match declared size "
                     + video.getSizeBytes());
         }
 
-        tx.executeWithoutResult(status -> {
+        boolean completedNow = Boolean.TRUE.equals(tx.execute(status -> {
             // Only the call that makes the transition writes the event: a concurrent duplicate writes nothing.
-            if (videos.transition(videoId, VideoStatus.UPLOADING, VideoStatus.UPLOADED, Instant.now()) == 1) {
+            if (videos.markUploaded(videoId, Instant.now()) == 1) {
                 outbox.append(videoId, VideoUploadedEvent.TYPE, Topics.VIDEO_UPLOADED, String.valueOf(videoId),
                         new VideoUploadedEvent(videoId, key));
+                return true;
             }
-        });
+            return false;
+        }));
+        if (completedNow) {
+            metrics.upload("completed");
+        }
         return videoService.get(userId, videoId);
     }
 
@@ -199,6 +210,7 @@ public class UploadService {
             storage.abortMultipartUpload(video.getOriginalS3Key(), video.getS3UploadId());
         }
         markUploadFailed(videoId);
+        metrics.upload("aborted");
     }
 
     /**
@@ -221,6 +233,7 @@ public class UploadService {
                 continue;
             }
             markUploadFailed(video.getId());
+            metrics.upload("expired");
             done++;
             log.info("Upload of video {} expired, multipart upload aborted", video.getId());
         }

@@ -5,7 +5,7 @@ Learning project for topic 4/30 (YouTube system design). The design reference is
 
 Stack: Java 26, Gradle, Spring Boot 4.1, JPA, PostgreSQL, Liquibase, Kafka, S3 (MinIO locally), same as `../whatsapp`.
 
-## What is implemented (PDF sections 1–5)
+## What is implemented (PDF sections 1–6, the section 8 follow-ups and section 9 monitoring)
 
 ```
 Client ──POST /uploads──────────────▶ videos row UPLOADING + S3 CreateMultipartUpload
@@ -85,10 +85,73 @@ Section 5 — streaming:
   app lets anyone GET `streams/*` in MinIO (`S3_PUBLIC_STREAMS`); in production the bucket stays private and only the
   CDN reads it, and `PLAYBACK_BASE_URL` is the CDN domain.
 - **Startup latency (p95 < 2 s)** is a player + CDN concern: the demo player starts at the lowest rendition and steps
-  up; short segments keep the first download small. Measuring it needs client-side metrics (not built).
+  up; short segments keep the first download small. Players report it (see Monitoring).
 
-Not yet: DASH manifest, CDN (section 6), client playback metrics, moderation and publication rules, signed URLs or
-cookies for private videos.
+## Sections 6, 8 and 9: CDN, follow-ups, monitoring
+
+```
+Player ── /api/search?q= ──────────────▶ Elasticsearch (BM25 × popularity × freshness)
+Player ── playbackUrl ─────────────────▶ CDN edge (nginx cache) ──miss──▶ MinIO streams/
+Player ── POST /videos/{id}/views ─────▶ Kafka video.views (key videoId) ─▶ ViewAggregator (batch)
+                                           Redis dedup ─ one tx: video_stats += n, consumer offsets ─┘
+Player ── POST /playback/reports ──────▶ startup / stall metrics
+video PLAYABLE / DELETED ─ outbox ─▶ video.changed ─▶ SearchIndexer (reads DB) ─▶ index upsert / delete
+DELETE /videos/{id} ────── outbox ─▶ video.deleted ─▶ StorageCleaner ─▶ streams/ + original removed
+ViewAggregator ─▶ Redis set of changed counters ─▶ SearchStatsSync (bulk, every 30 s) ─▶ index viewCount
+```
+
+**CDN (section 6).** `playbackUrl` points at the edge (`http://localhost:8093/streams/...`), an nginx cache in front
+of MinIO: a hit never reaches the origin; parallel misses for one segment are collapsed into one origin request
+(`proxy_cache_lock`); the origin's `Cache-Control` decides lifetimes (segments 1 year, master playlist 10 s); stale
+copies are served while the origin is down; only `streams/` is reachable, never `originals/`. `X-Cache-Status`
+shows HIT/MISS.
+
+**View count (section 8).**
+- *What a view is:* the player reports it after 30 s of watching (or the whole video if shorter), with an `eventId`
+  it generates once. The API checks it, puts it on Kafka and answers 202. No database write per view.
+- *Deduplication, two kinds:* the same `eventId` again (a retry) is never counted twice; the same user on the same video
+  within 24 h (refreshing) counts once. Both are checked in the batch and against Redis keys with a TTL.
+- *Eventual aggregation:* the aggregator reads a batch per poll and adds each video's views in **one** statement,
+  so 10 000 views/s of a viral video are one UPDATE per batch. The count catches up within seconds.
+- *Never counted twice:* `+n` is not idempotent, so the Kafka offsets are stored in the same transaction as the
+  counters (`consumer_offsets`) and the consumer seeks to them on start; a crash replays a batch only if its counts
+  were not committed.
+- *Hot counters:* the topic is keyed by video id, so each counter has exactly one writer and no row lock is fought
+  over; `video_stats` is a narrow table with `fillfactor 70` and no index on the counter, so updates are HOT
+  updates. Sharded counters (N rows per video) solve many writers on one row, which this design does not have.
+
+**Search (section 8).** Elasticsearch locally (OpenSearch takes the same REST requests).
+- *Indexing pipeline:* becoming playable or being deleted writes `VideoChanged` to the outbox in the same transaction;
+  the indexer reads the video's **current** state from PostgreSQL and upserts or deletes the document (id = video
+  id), so repeated or late events are harmless. The index is a copy, rebuilt from the database when needed (new index
+  behind the `videos` alias, then an alias switch). A one-time changeset queued the videos that were already playable.
+- *Relevance:* `score = BM25(title, typo-tolerant or prefix) × (log2(2 + views) + 2 × freshness)`. Titles are folded
+  (`ə`→`e`) and indexed with prefixes for search-as-you-type. View counts reach the index in bulk every 30 s, never per
+  view.
+- *Limits:* at most 50 per page and 500 in total (deep paging is expensive); 503 if the engine is down.
+
+**Storage lifecycle (section 8).** `DELETE /api/videos/{id}` makes the video invisible at once (API and search)
+and removes its files asynchronously: every rendition, playlist and the original. A job still encoding when the video
+is deleted removes its own output. Originals of videos that failed processing are kept 7 days, then deleted.
+Moving old originals to cold storage and aborting forgotten multipart uploads is the bucket's job:
+`aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration file://docs/s3-lifecycle.json`.
+Locally the nginx edge cannot purge, so a deleted video's cached segments live until they are evicted.
+
+**Monitoring (section 9)** at `/actuator/prometheus`:
+
+| Metric | Question it answers |
+|---|---|
+| `youtube_uploads_total{outcome}` | how many uploads are completed, aborted, expired, rejected |
+| `youtube_video_time_to_playable_seconds` | processing lag as a viewer feels it (upload verified → first rendition) |
+| `youtube_transcode_duration_seconds{resolution,outcome}` | encode time and failures per worker pool |
+| `youtube_variants_open{resolution}`, `kafka_consumer_fetch_manager_records_lag_max` | backlog per pool: the autoscaling signal for processing spikes |
+| `youtube_outbox_pending`, `youtube_outbox_oldest_age_seconds` | events stuck before Kafka |
+| `youtube_playback_startup_seconds` (buckets at 1/2/4 s) | startup latency reported by players: p95 < 2 s? |
+| `youtube_playback_rebuffer_ratio`, `youtube_playback_stalls_total` | rebuffering |
+| `youtube_views_total{outcome}`, `youtube_search_duration_seconds` | counted vs deduplicated views; search latency |
+
+Not yet: DASH manifest, autoscaling itself (the metrics above are its input), moderation and publication rules,
+signed URLs or cookies for private videos, ML re-ranking and personalised search.
 
 ## API
 
@@ -101,7 +164,11 @@ All requests need the `X-User-Id` header (see Authentication).
 | GET | `/api/videos/{id}/upload/progress` | uploaded and missing part numbers |
 | POST | `/api/videos/{id}/upload/complete` | verify and finish; safe to repeat |
 | DELETE | `/api/videos/{id}/upload` | abort |
-| GET | `/api/videos/{id}` | status, per-resolution variant status and size, `playbackUrl` once playable |
+| GET | `/api/videos/{id}` | status, variants, `viewCount`, `playbackUrl` once playable |
+| DELETE | `/api/videos/{id}` | owner deletes the video; files removed in the background |
+| POST | `/api/videos/{id}/views` | `{"eventId":"uuid","watchedSeconds":31}` → 202 |
+| GET | `/api/search?q=kafka&page=0&size=20` | public, no header needed |
+| POST | `/api/playback/reports` | `{"videoId","startupMs","watchedMs","stalledMs","stalls"}`, public (sent with `sendBeacon`) |
 
 The client PUTs part `n` (bytes `(n-1)·partSize … n·partSize`) to its URL. A browser client also needs CORS on the
 bucket; MinIO allows all origins by default.
@@ -109,21 +176,23 @@ bucket; MinIO allows all origins by default.
 ## Run locally
 
 - JDK 26: `C:\Users\AZINTELECOM\.jdks\temurin-26.0.2.1` (Project SDK and Gradle JVM in IntelliJ).
-- Create the database: `CREATE DATABASE youtube;` on `localhost:5433`.
-- Start Kafka (port 9095) and MinIO (S3 API 9010, console http://localhost:9011, `minioadmin`/`minioadmin`):
-  `docker compose -f docker/docker-compose.yml up -d`. The app creates the `youtube-videos` bucket on startup.
+- Create the database: `CREATE DATABASE youtube;` on `localhost:5433`. The password is not in the repository: set
+  `DB_PASSWORD` in the IntelliJ run configuration (Environment variables) or the terminal.
+- `docker compose -f docker/docker-compose.yml up -d` starts Kafka (9095), MinIO (S3 API 9010, console
+  http://localhost:9011, `minioadmin`/`minioadmin`), the CDN edge (8093), Redis (6381) and Elasticsearch (9201).
+  The app creates the `youtube-videos` bucket and the search index on startup.
 - MinIO is no longer published on Docker Hub; compose and the integration tests use the locally built
   `ecis-local/minio:RELEASE.2025-09-07T16-13-09Z` (override with `MINIO_IMAGE`).
 - ffmpeg and ffprobe on the `PATH` (`winget install Gyan.FFmpeg`), or `FFMPEG_PATH` / `FFPROBE_PATH`. Without them,
   run with `TRANSCODING_ENGINE=simulated` (no real segments, nothing to play).
 - The app listens on port `8082` (`SERVER_PORT`), so it can run next to twitter (`8080`) and whatsapp (`8081`).
-- Demo player: http://localhost:8082/player.html — enter a video id and play it; throttle the network in DevTools to
-  watch hls.js switch renditions.
+- Demo player: http://localhost:8082/player.html — search, play, watch hls.js switch renditions (throttle the network
+  in DevTools); it reports views and playback metrics like a real client.
 
 ```
 ./gradlew bootRun
 ./gradlew test               # unit tests
-./gradlew integrationTest    # PostgreSQL, Kafka and MinIO in Docker (Testcontainers); FfmpegPipelineIT needs ffmpeg
+./gradlew integrationTest    # PostgreSQL, Kafka, MinIO, Redis, Elasticsearch in Docker; FfmpegPipelineIT needs ffmpeg
 ```
 
 ## Authentication (development)

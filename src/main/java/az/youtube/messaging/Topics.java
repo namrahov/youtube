@@ -17,6 +17,18 @@ public final class Topics {
     public static final String TRANSCODE_1080P = "video.transcode.1080p";
     public static final String TRANSCODE_4K = "video.transcode.4k";
 
+    /** The searchable state of a video changed (became playable, deleted); keyed by video id. Search indexer. */
+    public static final String VIDEO_CHANGED = "video.changed";
+
+    /** The owner deleted a video; keyed by video id. Storage cleaner. */
+    public static final String VIDEO_DELETED = "video.deleted";
+
+    /**
+     * One counted-worthy view per message, keyed by video id: all views of a video go to one partition and so to
+     * one aggregator, which is then the only writer of that video's counter (no row contention, no lost updates).
+     */
+    public static final String VIDEO_VIEWS = "video.views";
+
     public static final String DLT_SUFFIX = ".DLT";
 
     private Topics() {

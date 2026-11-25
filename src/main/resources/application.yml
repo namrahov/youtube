@@ -2,9 +2,10 @@ spring:
   application:
     name: youtube
   datasource:
-    url: jdbc:postgresql://localhost:5433/youtube
-    username: postgres
-    password: Genius33Frozen
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/youtube}
+    username: ${DB_USERNAME:postgres}
+    # No default on purpose: set DB_PASSWORD in the IntelliJ run configuration or the terminal.
+    password: ${DB_PASSWORD}
     hikari:
       # 10 transcoding listener threads (4+3+2+1) can each hold a connection while the manifest is written,
       # plus web requests, the outbox publisher and the expiry sweep.
@@ -26,6 +27,11 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6381}
+      timeout: 2s
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9095}
     producer:
@@ -57,8 +63,32 @@ youtube:
     # player can stream straight from MinIO. In production the bucket is private and only the CDN reads it.
     public-streams: ${S3_PUBLIC_STREAMS:true}
   playback:
-    # Base of the playback URLs the API returns: the CDN domain in production, the MinIO bucket locally.
-    base-url: ${PLAYBACK_BASE_URL:http://localhost:9010/youtube-videos}
+    # Base of the playback URLs the API returns: the CDN. Locally the nginx edge from docker-compose (port 8093),
+    # which serves streams/ from MinIO; in production the CDN domain.
+    base-url: ${PLAYBACK_BASE_URL:http://localhost:8093}
+  search:
+    # Elasticsearch locally; OpenSearch takes the same requests.
+    url: ${SEARCH_URL:http://localhost:9201}
+    # The alias the app reads and writes. A reindex builds a new index and moves the alias, with no downtime.
+    index: ${SEARCH_INDEX:videos}
+    timeout: ${SEARCH_TIMEOUT:3s}
+    # View counts change constantly; they are copied into the index in bulk at this interval, not per view.
+    stats-sync-interval-ms: ${SEARCH_STATS_SYNC_INTERVAL_MS:30000}
+  views:
+    # A view counts after this much watching (or the whole video, if it is shorter).
+    min-watch: ${VIEWS_MIN_WATCH:30s}
+    # The same user is counted once per video within this window: refreshing the page does not add views.
+    repeat-viewer-window: ${VIEWS_REPEAT_VIEWER_WINDOW:24h}
+    # How long a view's eventId is remembered, so a retried request is not counted again.
+    event-dedup-ttl: ${VIEWS_EVENT_DEDUP_TTL:24h}
+    # The aggregator waits up to this long for a batch to fill, then adds each video's views in one UPDATE.
+    batch-wait-ms: ${VIEWS_BATCH_WAIT_MS:2000}
+    max-batch: ${VIEWS_MAX_BATCH:5000}
+  lifecycle:
+    # Originals of videos that failed processing (not a readable video, every rendition failed) are kept this long
+    # for support and debugging, then deleted.
+    failed-original-retention: ${LIFECYCLE_FAILED_ORIGINAL_RETENTION:7d}
+    purge-sweep-interval-ms: ${LIFECYCLE_PURGE_SWEEP_INTERVAL_MS:3600000}
   upload:
     # 2 GB / 64 MB = 32 parts. A failed part is retried alone; S3 allows at most 10 000 parts per upload.
     part-size: ${UPLOAD_PART_SIZE:64MB}
@@ -114,7 +144,20 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # prometheus: scraped by Prometheus; metrics: the same numbers, browsable as JSON.
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: never
+  metrics:
+    tags:
+      application: youtube
+    distribution:
+      # Playback startup (PDF target: p95 < 2 s) and encode time: histogram buckets let Prometheus compute
+      # percentiles over many instances (client-side percentiles cannot be added up).
+      percentiles-histogram:
+        youtube.playback.startup: true
+        youtube.transcode.duration: true
+        youtube.video.time.to.playable: true
+      slo:
+        youtube.playback.startup: 1s,2s,4s

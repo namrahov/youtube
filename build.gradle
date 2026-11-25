@@ -25,6 +25,10 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-kafka'
+    // View count deduplication and the set of counters waiting to be copied to the search index.
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    // /actuator/prometheus: upload, processing, outbox and playback metrics (PDF section 9).
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
     // S3 API: MinIO locally, AWS S3 in production. Multipart upload and presigned part URLs.
     implementation platform('software.amazon.awssdk:bom:2.42.1')
     implementation 'software.amazon.awssdk:s3'

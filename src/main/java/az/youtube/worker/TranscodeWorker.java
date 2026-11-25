@@ -3,10 +3,14 @@ package az.youtube.worker;
 import az.youtube.dto.event.TranscodeRequestedEvent;
 import az.youtube.entity.Resolution;
 import az.youtube.messaging.Topics;
+import az.youtube.metrics.AppMetrics;
 import az.youtube.service.ProcessingService;
+import az.youtube.storage.ObjectStorage;
+import az.youtube.storage.StorageKeys;
 import az.youtube.transcoding.Rendition;
 import az.youtube.transcoding.Transcoder;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Optional;
 
@@ -33,11 +37,16 @@ public class TranscodeWorker {
 
     private final ProcessingService processing;
     private final Transcoder transcoder;
+    private final ObjectStorage storage;
+    private final AppMetrics metrics;
     private final JsonMapper json;
 
-    public TranscodeWorker(ProcessingService processing, Transcoder transcoder, JsonMapper json) {
+    public TranscodeWorker(ProcessingService processing, Transcoder transcoder, ObjectStorage storage,
+                           AppMetrics metrics, JsonMapper json) {
         this.processing = processing;
         this.transcoder = transcoder;
+        this.storage = storage;
+        this.metrics = metrics;
         this.json = json;
     }
 
@@ -82,8 +91,22 @@ public class TranscodeWorker {
             log.debug("Job {} of video {} already done, skipped", job.resolution().label(), job.videoId());
             return;
         }
-        Rendition rendition = transcoder.transcode(job);
-        processing.completeVariant(job.videoId(), job.resolution(), rendition);
+        long started = System.nanoTime();
+        Rendition rendition;
+        try {
+            rendition = transcoder.transcode(job);
+        } catch (RuntimeException e) {
+            metrics.transcode(job.resolution(), false, Duration.ofNanos(System.nanoTime() - started));
+            throw e;
+        }
+        metrics.transcode(job.resolution(), true, Duration.ofNanos(System.nanoTime() - started));
+        if (!processing.completeVariant(job.videoId(), job.resolution(), rendition)) {
+            // Deleted while encoding: the storage cleaner may have run before these files existed.
+            storage.deletePrefix(StorageKeys.renditionDir(job.videoId(), job.resolution()));
+            log.info("Video {} was deleted during its {} job; rendition removed", job.videoId(),
+                    job.resolution().label());
+            return;
+        }
         log.info("Video {}: {} ready", job.videoId(), job.resolution().label());
     }
 }

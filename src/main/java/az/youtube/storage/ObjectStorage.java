@@ -8,6 +8,7 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.OptionalLong;
@@ -19,6 +20,8 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
@@ -28,6 +31,9 @@ public class ObjectStorage implements InitializingBean {
 
     public record UploadedPart(int partNumber, String eTag, long size) {
     }
+
+    /** The S3 maximum per DeleteObjects request. */
+    private static final int DELETE_BATCH = 1000;
 
     private final S3Client s3;
     private final S3Presigner presigner;
@@ -159,5 +165,36 @@ public class ObjectStorage implements InitializingBean {
 
     public void delete(String key) {
         s3.deleteObject(b -> b.bucket(bucket).key(key));
+    }
+
+    /**
+     * Deletes every object under {@code prefix} (a 2-hour 4K rendition is ~1800 segments), 1000 per request.
+     * Safe to repeat: an empty prefix deletes nothing.
+     *
+     * @return how many objects were deleted
+     */
+    public int deletePrefix(String prefix) {
+        int deleted = 0;
+        List<ObjectIdentifier> batch = new ArrayList<>(DELETE_BATCH);
+        for (S3Object object : s3.listObjectsV2Paginator(b -> b.bucket(bucket).prefix(prefix)).contents()) {
+            batch.add(ObjectIdentifier.builder().key(object.key()).build());
+            if (batch.size() == DELETE_BATCH) {
+                deleted += deleteBatch(batch);
+                batch.clear();
+            }
+        }
+        if (!batch.isEmpty()) {
+            deleted += deleteBatch(batch);
+        }
+        return deleted;
+    }
+
+    private int deleteBatch(List<ObjectIdentifier> keys) {
+        var response = s3.deleteObjects(b -> b.bucket(bucket).delete(d -> d.objects(keys).quiet(true)));
+        if (response.hasErrors() && !response.errors().isEmpty()) {
+            throw new IllegalStateException("Could not delete " + response.errors().size() + " objects, first: "
+                    + response.errors().getFirst().key() + " " + response.errors().getFirst().message());
+        }
+        return keys.size();
     }
 }

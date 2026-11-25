@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.List;
 
 /**
+ * @param viewCount   counted views; catches up within seconds of a view (eventual consistency)
  * @param manifestKey object key of the HLS master playlist once the video is PLAYABLE
  * @param playbackUrl the master playlist's URL for a player (hls.js, Safari, ExoPlayer, AVPlayer) once the video is
  *                    PLAYABLE: through the CDN in production. The player then picks renditions and segments itself
@@ -16,6 +17,7 @@ public record VideoResponse(
         String title,
         VideoStatus status,
         long sizeBytes,
+        long viewCount,
         String manifestKey,
         String playbackUrl,
         List<Variant> variants,
