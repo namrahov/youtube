@@ -5,7 +5,9 @@ import az.youtube.entity.VariantStatus;
 import az.youtube.transcoding.Rendition;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -54,7 +56,8 @@ public class VariantRepository {
      * A job still running elsewhere is not redelivered: the worker pool's max.poll.interval.ms is longer than the job
      * timeout (see KafkaConfig).
      *
-     * @return false if the variant is already COMPLETED, FAILED or SKIPPED (a duplicate job), or does not exist
+     * @return false if the variant is already COMPLETED, FAILED or SKIPPED (a duplicate job), does not exist, or its
+     *         video was deleted (nothing to encode for)
      */
     public boolean claim(long videoId, Resolution resolution) {
         return jdbc.sql("""
@@ -62,6 +65,7 @@ public class VariantRepository {
                         SET status = 'PROCESSING', attempts = attempts + 1, updated_at = now()
                         WHERE video_id = :videoId AND resolution = :resolution
                           AND status IN ('PENDING', 'PROCESSING')
+                          AND NOT EXISTS (SELECT 1 FROM videos WHERE id = :videoId AND status = 'DELETED')
                         """)
                 .param("videoId", videoId)
                 .param("resolution", resolution.label())
@@ -130,6 +134,18 @@ public class VariantRepository {
                 .stream()
                 .sorted((a, b) -> a.resolution().compareTo(b.resolution()))
                 .toList();
+    }
+
+    /** Jobs waiting or running per resolution (partial index on open variants). */
+    public Map<Resolution, Long> openJobsByResolution() {
+        return jdbc.sql("""
+                        SELECT resolution, count(*) AS open FROM video_variants
+                        WHERE status IN ('PENDING', 'PROCESSING') GROUP BY resolution
+                        """)
+                .query((rs, i) -> Map.entry(Resolution.fromLabel(rs.getString("resolution")), rs.getLong("open")))
+                .list()
+                .stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     public Optional<Variant> find(long videoId, Resolution resolution) {

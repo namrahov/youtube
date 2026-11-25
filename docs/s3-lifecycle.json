@@ -1,0 +1,18 @@
+{
+  "Rules": [
+    {
+      "ID": "originals-to-cold-storage",
+      "Filter": { "Prefix": "originals/" },
+      "Status": "Enabled",
+      "Transitions": [
+        { "Days": 30, "StorageClass": "GLACIER_IR" }
+      ]
+    },
+    {
+      "ID": "abort-incomplete-multipart-uploads",
+      "Filter": { "Prefix": "" },
+      "Status": "Enabled",
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 2 }
+    }
+  ]
+}

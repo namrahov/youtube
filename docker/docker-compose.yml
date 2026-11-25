@@ -1,5 +1,6 @@
-# Local infrastructure for the youtube app: Kafka + MinIO (S3 API). PostgreSQL runs on the host (port 5433).
-# Host ports differ from twitter (Kafka 9092) and whatsapp (Kafka 9094) so all stacks can run at once.
+# Local infrastructure for the youtube app: Kafka, MinIO (S3 API), a CDN edge, Redis and Elasticsearch.
+# PostgreSQL runs on the host (port 5433).
+# Host ports differ from twitter (Kafka 9092, Redis 6380) and whatsapp (Kafka 9094) so all stacks can run at once.
 # Usage: docker compose -f docker/docker-compose.yml up -d
 name: youtube
 
@@ -43,6 +44,43 @@ services:
       - minio-data:/data
     restart: unless-stopped
 
+  cdn:
+    # CDN edge (nginx cache) in front of MinIO: players stream from http://localhost:8093/streams/...
+    image: nginx:1.28-alpine
+    container_name: youtube-cdn
+    depends_on:
+      - minio
+    ports:
+      - "8093:80"
+    volumes:
+      - ./cdn/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - cdn-cache:/var/cache/nginx/cdn
+    restart: unless-stopped
+
+  redis:
+    # View deduplication keys and the queue of counters to copy into the search index.
+    image: redis:7.4.2
+    container_name: youtube-redis
+    ports:
+      - "6381:6379"
+    restart: unless-stopped
+
+  elasticsearch:
+    # Search index (OpenSearch exposes the same REST API). Single node, no security: local development only.
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.0.0}
+    container_name: youtube-elasticsearch
+    ports:
+      - "9201:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   minio-data:
+  cdn-cache:
+  es-data:

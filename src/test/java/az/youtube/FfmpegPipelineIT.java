@@ -10,6 +10,9 @@ import az.youtube.dto.response.VideoResponse;
 import az.youtube.entity.VariantStatus;
 import az.youtube.entity.VideoStatus;
 import az.youtube.security.HeaderCurrentUserProvider;
+import az.youtube.service.VideoLifecycleService;
+import az.youtube.storage.ObjectStorage;
+import az.youtube.storage.StorageKeys;
 
 import java.io.IOException;
 import java.net.URI;
@@ -29,6 +32,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -51,6 +55,12 @@ class FfmpegPipelineIT extends IntegrationTest {
 
     @TempDir
     Path tempDir;
+
+    @Autowired
+    private VideoLifecycleService lifecycle;
+
+    @Autowired
+    private ObjectStorage storage;
 
     private RestClient api;
 
@@ -131,6 +141,14 @@ class FfmpegPipelineIT extends IntegrationTest {
         await("video " + videoId + " PROCESSING_FAILED", ENCODE_TIMEOUT,
                 () -> get(user, videoId).status() == VideoStatus.PROCESSING_FAILED);
         assertThat(get(user, videoId).variants()).isEmpty();
+
+        // Kept for the retention period (7 days by default), then the original is deleted.
+        lifecycle.purgeFailed(100);
+        assertThat(storage.objectSize(StorageKeys.original(videoId))).isPresent();
+        jdbc.sql("UPDATE videos SET updated_at = now() - interval '8 days' WHERE id = :id").param("id", videoId)
+                .update();
+        lifecycle.purgeFailed(100);
+        assertThat(storage.objectSize(StorageKeys.original(videoId))).isEmpty();
     }
 
     /** A test pattern with a 440 Hz tone, H.264 + AAC in MP4: what a phone or camera would upload. */

@@ -47,6 +47,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
         "youtube.transcoding.simulated-duration.P720=50ms",
         "youtube.transcoding.simulated-duration.P1080=50ms",
         "youtube.transcoding.simulated-duration.P2160=300ms",
+        "youtube.views.batch-wait-ms=100",
+        "youtube.search.stats-sync-interval-ms=200",
+        "youtube.metrics.backlog-refresh-ms=200",
 })
 @Import(IntegrationTest.FaultInjection.class)
 // One application per test class, closed after it: two live contexts would share the Kafka consumer groups, and the
@@ -71,8 +74,19 @@ public abstract class IntegrationTest {
             .withExposedPorts(9000)
             .waitingFor(Wait.forHttp("/minio/health/live").forPort(9000));
 
+    static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7.4.2").withExposedPorts(6379);
+
+    static final GenericContainer<?> ELASTICSEARCH = new GenericContainer<>(
+            System.getenv().getOrDefault("ELASTICSEARCH_IMAGE", "docker.elastic.co/elasticsearch/elasticsearch:9.0.0"))
+            .withEnv("discovery.type", "single-node")
+            .withEnv("xpack.security.enabled", "false")
+            .withEnv("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
+            .withExposedPorts(9200)
+            .waitingFor(Wait.forHttp("/_cluster/health?wait_for_status=yellow").forPort(9200)
+                    .withStartupTimeout(Duration.ofMinutes(3)));
+
     static {
-        Startables.deepStart(POSTGRES, KAFKA, MINIO).join();
+        Startables.deepStart(POSTGRES, KAFKA, MINIO, REDIS, ELASTICSEARCH).join();
     }
 
     @DynamicPropertySource
@@ -81,6 +95,10 @@ public abstract class IntegrationTest {
         registry.add("youtube.storage.access-key", () -> "minioadmin");
         registry.add("youtube.storage.secret-key", () -> "minioadmin");
         registry.add("youtube.playback.base-url", () -> minioUrl() + "/youtube-videos");
+        registry.add("spring.data.redis.host", REDIS::getHost);
+        registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        registry.add("youtube.search.url",
+                () -> "http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
     }
 
     static String minioUrl() {

@@ -7,6 +7,7 @@ import az.youtube.dto.response.UploadProgressResponse;
 import az.youtube.dto.response.VideoResponse;
 import az.youtube.security.CurrentUser;
 import az.youtube.service.UploadService;
+import az.youtube.service.VideoLifecycleService;
 import az.youtube.service.VideoService;
 import jakarta.validation.Valid;
 
@@ -37,10 +38,12 @@ public class VideoController {
 
     private final UploadService uploads;
     private final VideoService videos;
+    private final VideoLifecycleService lifecycle;
 
-    public VideoController(UploadService uploads, VideoService videos) {
+    public VideoController(UploadService uploads, VideoService videos, VideoLifecycleService lifecycle) {
         this.uploads = uploads;
         this.videos = videos;
+        this.lifecycle = lifecycle;
     }
 
     @PostMapping("/uploads")
@@ -75,5 +78,12 @@ public class VideoController {
     @GetMapping("/{videoId}")
     public VideoResponse get(@CurrentUser long userId, @PathVariable long videoId) {
         return videos.get(userId, videoId);
+    }
+
+    /** Owner only. The video disappears at once; its files are removed in the background. */
+    @DeleteMapping("/{videoId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@CurrentUser long userId, @PathVariable long videoId) {
+        lifecycle.delete(userId, videoId);
     }
 }

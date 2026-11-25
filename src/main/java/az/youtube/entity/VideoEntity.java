@@ -67,6 +67,19 @@ public class VideoEntity implements Persistable<Long> {
     @Column(name = "source_duration_ms")
     private Long sourceDurationMs;
 
+    @Column(name = "uploaded_at")
+    private Instant uploadedAt;
+
+    /** When the video first became playable. */
+    @Column(name = "published_at")
+    private Instant publishedAt;
+
+    @Column(name = "deleted_at")
+    private Instant deletedAt;
+
+    @Column(name = "storage_purged_at")
+    private Instant storagePurgedAt;
+
     @Column(name = "upload_expires_at", nullable = false)
     private Instant uploadExpiresAt;
 
@@ -173,6 +186,26 @@ public class VideoEntity implements Persistable<Long> {
 
     public Long getSourceDurationMs() {
         return sourceDurationMs;
+    }
+
+    public Instant getUploadedAt() {
+        return uploadedAt;
+    }
+
+    public Instant getPublishedAt() {
+        return publishedAt;
+    }
+
+    public Instant getDeletedAt() {
+        return deletedAt;
+    }
+
+    public Instant getStoragePurgedAt() {
+        return storagePurgedAt;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
     }
 
     public Instant getUploadExpiresAt() {

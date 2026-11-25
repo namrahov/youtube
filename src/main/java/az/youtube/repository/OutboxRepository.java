@@ -62,6 +62,20 @@ public class OutboxRepository {
                 .toList();
     }
 
+    public record PendingStats(long count, long oldestAgeSeconds) {
+    }
+
+    /** Unpublished events and the age of the oldest one; reads only the partial index of unpublished rows. */
+    public PendingStats pendingStats() {
+        return jdbc.sql("""
+                        SELECT count(*) AS pending,
+                               coalesce(extract(epoch FROM now() - min(created_at)), 0)::bigint AS oldest_age
+                        FROM outbox WHERE published_at IS NULL
+                        """)
+                .query((rs, i) -> new PendingStats(rs.getLong("pending"), rs.getLong("oldest_age")))
+                .single();
+    }
+
     public void markPublished(Collection<Long> ids) {
         if (ids.isEmpty()) {
             return;

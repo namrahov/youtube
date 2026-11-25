@@ -54,12 +54,56 @@ public interface VideoRepository extends JpaRepository<VideoEntity, Long> {
     int recordSource(@Param("id") long id, @Param("width") int width, @Param("height") int height,
                      @Param("durationMs") long durationMs, @Param("now") Instant now);
 
-    /** Sets the status derived from the variants; a null manifest key keeps the current one. */
+    /** UPLOADING → UPLOADED, and the moment of it (start of the time-to-playable metric). */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update VideoEntity v set v.status = az.youtube.entity.VideoStatus.UPLOADED, v.uploadedAt = :now,
+                v.updatedAt = :now
+            where v.id = :id and v.status = az.youtube.entity.VideoStatus.UPLOADING
+            """)
+    int markUploaded(@Param("id") long id, @Param("now") Instant now);
+
+    /** @return 1 the first time only: the video has just become playable (published) */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update VideoEntity v set v.publishedAt = :now where v.id = :id and v.publishedAt is null")
+    int markPublished(@Param("id") long id, @Param("now") Instant now);
+
+    /**
+     * Soft delete. Not from UPLOADING: an open upload is aborted first, so its multipart parts are removed too.
+     *
+     * @return 1 if this call deleted the video, 0 if it was already DELETED or is still uploading
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update VideoEntity v set v.status = az.youtube.entity.VideoStatus.DELETED, v.deletedAt = :now,
+                v.updatedAt = :now
+            where v.id = :id and v.status <> az.youtube.entity.VideoStatus.DELETED
+              and v.status <> az.youtube.entity.VideoStatus.UPLOADING
+            """)
+    int markDeleted(@Param("id") long id, @Param("now") Instant now);
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update VideoEntity v set v.storagePurgedAt = :now where v.id = :id and v.storagePurgedAt is null")
+    int markStoragePurged(@Param("id") long id, @Param("now") Instant now);
+
+    /** Failed videos whose original is still stored and older than {@code before} (partial index). */
+    @Query("""
+            select v from VideoEntity v
+            where v.status = az.youtube.entity.VideoStatus.PROCESSING_FAILED and v.storagePurgedAt is null
+              and v.updatedAt < :before
+            order by v.updatedAt
+            """)
+    List<VideoEntity> findFailedToPurge(@Param("before") Instant before, Pageable page);
+
+    /**
+     * Sets the status derived from the variants; a null manifest key keeps the current one. A DELETED video is left
+     * alone: a job that was still running when the owner deleted it must not bring it back.
+     */
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
             update VideoEntity v
             set v.status = :status, v.manifestS3Key = coalesce(:manifestKey, v.manifestS3Key), v.updatedAt = :now
-            where v.id = :id
+            where v.id = :id and v.status <> az.youtube.entity.VideoStatus.DELETED
             """)
     int updateProcessingState(@Param("id") long id, @Param("status") VideoStatus status,
                               @Param("manifestKey") String manifestKey, @Param("now") Instant now);

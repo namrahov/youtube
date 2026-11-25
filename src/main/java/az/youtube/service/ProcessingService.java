@@ -2,16 +2,21 @@ package az.youtube.service;
 
 import az.youtube.config.TranscodingProperties;
 import az.youtube.dto.event.TranscodeRequestedEvent;
+import az.youtube.dto.event.VideoChangedEvent;
 import az.youtube.dto.event.VideoUploadedEvent;
 import az.youtube.entity.Resolution;
 import az.youtube.entity.VariantStatus;
+import az.youtube.entity.VideoEntity;
 import az.youtube.entity.VideoStatus;
+import az.youtube.messaging.Topics;
+import az.youtube.metrics.AppMetrics;
 import az.youtube.repository.VariantRepository;
 import az.youtube.repository.VariantRepository.Variant;
 import az.youtube.repository.VideoRepository;
 import az.youtube.transcoding.Rendition;
 import az.youtube.transcoding.SourceInfo;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -33,14 +38,16 @@ public class ProcessingService {
     private final OutboxService outbox;
     private final ManifestWriter manifests;
     private final TranscodingProperties properties;
+    private final AppMetrics metrics;
 
     public ProcessingService(VideoRepository videos, VariantRepository variants, OutboxService outbox,
-                             ManifestWriter manifests, TranscodingProperties properties) {
+                             ManifestWriter manifests, TranscodingProperties properties, AppMetrics metrics) {
         this.videos = videos;
         this.variants = variants;
         this.outbox = outbox;
         this.manifests = manifests;
         this.properties = properties;
+        this.metrics = metrics;
     }
 
     /** Lets the planner skip a duplicate event before it spends an ffprobe run on it. */
@@ -98,13 +105,18 @@ public class ProcessingService {
      * Marks one variant COMPLETED and recalculates the video. The video row is locked first: when 720p and 1080p
      * finish at the same moment, the second waits and then sees both, so the manifest lists both and
      * FULLY_PROCESSED is not missed. The status is PLAYABLE only after the manifest that lists the variant exists.
+     *
+     * @return false if the video was deleted while the job ran: the caller removes the files it just uploaded
      */
     @Transactional
-    public void completeVariant(long videoId, Resolution resolution, Rendition rendition) {
-        videos.lockById(videoId);
+    public boolean completeVariant(long videoId, Resolution resolution, Rendition rendition) {
+        Optional<VideoEntity> video = videos.lockById(videoId);
+        if (video.isEmpty() || video.get().getStatus() == VideoStatus.DELETED) {
+            return false;
+        }
         if (variants.markCompleted(videoId, resolution, rendition) == 0) {
             log.debug("Variant {} of video {} already completed, duplicate ignored", resolution.label(), videoId);
-            return;
+            return true;
         }
         List<Variant> all = variants.findByVideo(videoId);
         List<Variant> completed = all.stream().filter(v -> v.status() == VariantStatus.COMPLETED).toList();
@@ -112,7 +124,8 @@ public class ProcessingService {
         // Trade-off: a slow S3 PUT holds the lock and a connection. If the commit then fails, the manifest lists a
         // rendition that exists but is not yet COMPLETED in the DB; the job is redelivered and repairs it.
         String manifestKey = manifests.write(videoId, completed);
-        updateStatus(videoId, all, manifestKey);
+        updateStatus(video.get(), all, manifestKey);
+        return true;
     }
 
     /**
@@ -121,17 +134,36 @@ public class ProcessingService {
      */
     @Transactional
     public void failVariant(long videoId, Resolution resolution, String error) {
-        videos.lockById(videoId);
+        Optional<VideoEntity> video = videos.lockById(videoId);
+        if (video.isEmpty()) {
+            return;
+        }
         String message = error == null ? "unknown error" : error.substring(0, Math.min(error.length(), MAX_ERROR_LENGTH));
         if (variants.markFailed(videoId, resolution, message) == 0) {
             return;
         }
         log.warn("Variant {} of video {} FAILED: {}", resolution.label(), videoId, message);
-        updateStatus(videoId, variants.findByVideo(videoId), null);
+        metrics.variantFailed(resolution);
+        updateStatus(video.get(), variants.findByVideo(videoId), null);
     }
 
-    private void updateStatus(long videoId, List<Variant> all, String manifestKey) {
+    /**
+     * Derives the status from the variants. The first time the video becomes playable it is published: the search
+     * index is told (through the outbox, in this transaction) and the processing lag is recorded.
+     */
+    private void updateStatus(VideoEntity video, List<Variant> all, String manifestKey) {
+        long videoId = video.getId();
+        Instant now = Instant.now();
         VideoStatus status = VideoStatusCalculator.derive(all.stream().map(Variant::status).toList());
-        videos.updateProcessingState(videoId, status, manifestKey, Instant.now());
+        if (videos.updateProcessingState(videoId, status, manifestKey, now) == 0) {
+            return; // deleted meanwhile
+        }
+        if (status.isPlayable() && videos.markPublished(videoId, now) == 1) {
+            outbox.append(videoId, VideoChangedEvent.TYPE, Topics.VIDEO_CHANGED, String.valueOf(videoId),
+                    new VideoChangedEvent(videoId));
+            if (video.getUploadedAt() != null) {
+                metrics.timeToPlayable(Duration.between(video.getUploadedAt(), now));
+            }
+        }
     }
 }
