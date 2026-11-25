@@ -17,6 +17,8 @@ import az.youtube.service.ProcessingService;
 import az.youtube.service.UploadService;
 import az.youtube.storage.ObjectStorage;
 import az.youtube.storage.StorageKeys;
+import az.youtube.transcoding.FrameSize;
+import az.youtube.transcoding.Rendition;
 
 import java.io.IOException;
 import java.net.URI;
@@ -85,6 +87,12 @@ class VideoPipelineIT extends IntegrationTest {
         assertThat(storage.getText(done.manifestKey()))
                 .contains("360p/index.m3u8", "720p/index.m3u8", "1080p/index.m3u8", "4k/index.m3u8");
 
+        // A player fetches the streams anonymously (as through a CDN); the original stays private.
+        assertThat(done.playbackUrl()).endsWith("/youtube-videos/streams/" + init.videoId() + "/master.m3u8");
+        assertThat(anonymousGet(done.playbackUrl())).isEqualTo(200);
+        assertThat(anonymousGet(done.playbackUrl().replace("streams/" + init.videoId() + "/master.m3u8",
+                StorageKeys.original(init.videoId())))).isEqualTo(403);
+
         assertThat(outboxEvents(init.videoId())).containsEntry("VideoUploaded", 1L).containsEntry("TranscodeRequested", 4L);
     }
 
@@ -120,7 +128,9 @@ class VideoPipelineIT extends IntegrationTest {
                 .param("id", videoId).query(Integer.class).single()).isEqualTo(2);
 
         // A redelivered "720p completed" must not count as the fourth completion.
-        processing.completeVariant(videoId, Resolution.P720, StorageKeys.renditionPlaylist(videoId, Resolution.P720));
+        processing.completeVariant(videoId, Resolution.P720, Rendition.nominal(
+                StorageKeys.renditionPlaylist(videoId, Resolution.P720), Resolution.P720,
+                FrameSize.of(Resolution.P720, null, null), true));
         // A redelivered 4K job is skipped: the variant is final.
         assertThat(processing.claimVariant(videoId, Resolution.P2160)).isFalse();
         assertThat(get(user, videoId).status()).isEqualTo(VideoStatus.PLAYABLE);
@@ -213,6 +223,11 @@ class VideoPipelineIT extends IntegrationTest {
                     HttpResponse.BodyHandlers.ofString());
             assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
         }
+    }
+
+    private int anonymousGet(String url) throws IOException, InterruptedException {
+        return http.send(HttpRequest.newBuilder(URI.create(url)).GET().build(), HttpResponse.BodyHandlers.discarding())
+                .statusCode();
     }
 
     private VideoResponse complete(long user, long videoId) {

@@ -1,20 +1,23 @@
 package az.youtube.transcoding;
 
 import az.youtube.config.TranscodingProperties;
+import az.youtube.dto.event.TranscodeRequestedEvent;
 import az.youtube.entity.Resolution;
 import az.youtube.storage.ObjectStorage;
 import az.youtube.storage.StorageKeys;
 
 import java.time.Duration;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * Stand-in for ffmpeg: checks that the original exists, takes as long as a real job of that resolution would
- * (configurable, 4K longest) and writes a rendition playlist without segments. Real encoding and segmenting
- * (HLS/DASH, PDF section 5) is a later step; everything around it — jobs, retries, statuses, manifest — is real.
+ * Stand-in for ffmpeg ({@code youtube.transcoding.engine=simulated}): checks that the original exists, takes as long
+ * as a real job of that resolution would (configurable, 4K longest) and writes a rendition playlist without segments.
+ * Used by the tests, whose "videos" are random bytes, and on machines without ffmpeg.
  */
 @Component
+@ConditionalOnProperty(prefix = "youtube.transcoding", name = "engine", havingValue = "simulated", matchIfMissing = true)
 public class SimulatedTranscoder implements Transcoder {
 
     private final ObjectStorage storage;
@@ -26,12 +29,13 @@ public class SimulatedTranscoder implements Transcoder {
     }
 
     @Override
-    public String transcode(long videoId, String sourceKey, Resolution resolution) {
-        if (storage.objectSize(sourceKey).isEmpty()) {
-            throw new TranscodingException("Original " + sourceKey + " not found");
+    public Rendition transcode(TranscodeRequestedEvent job) {
+        Resolution resolution = job.resolution();
+        if (storage.objectSize(job.sourceS3Key()).isEmpty()) {
+            throw new TranscodingException("Original " + job.sourceS3Key() + " not found");
         }
         work(properties.simulatedDurationOf(resolution));
-        String key = StorageKeys.renditionPlaylist(videoId, resolution);
+        String key = StorageKeys.renditionPlaylist(job.videoId(), resolution);
         storage.putText(key, """
                 #EXTM3U
                 #EXT-X-VERSION:7
@@ -41,7 +45,8 @@ public class SimulatedTranscoder implements Transcoder {
                 #EXT-X-ENDLIST
                 """.formatted(resolution.label()),
                 "application/vnd.apple.mpegurl", "public, max-age=31536000, immutable");
-        return key;
+        return Rendition.nominal(key, resolution,
+                FrameSize.of(resolution, job.sourceWidth(), job.sourceHeight()), job.hasAudio());
     }
 
     private static void work(Duration duration) {

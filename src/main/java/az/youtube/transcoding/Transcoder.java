@@ -1,13 +1,14 @@
 package az.youtube.transcoding;
 
-import az.youtube.entity.Resolution;
+import az.youtube.dto.event.TranscodeRequestedEvent;
 
 /** Turns the original into one HLS rendition and stores it. */
 public interface Transcoder {
 
     /**
-     * @return the key of the rendition's playlist
+     * Produces the job's rendition. Safe to repeat: the output keys are fixed, so a retry overwrites them.
+     *
      * @throws TranscodingException if the rendition cannot be produced (the job is retried, then marked FAILED)
      */
-    String transcode(long videoId, String sourceKey, Resolution resolution);
+    Rendition transcode(TranscodeRequestedEvent job);
 }

@@ -9,9 +9,12 @@ import az.youtube.entity.VideoStatus;
 import az.youtube.repository.VariantRepository;
 import az.youtube.repository.VariantRepository.Variant;
 import az.youtube.repository.VideoRepository;
+import az.youtube.transcoding.Rendition;
+import az.youtube.transcoding.SourceInfo;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,25 +43,52 @@ public class ProcessingService {
         this.properties = properties;
     }
 
+    /** Lets the planner skip a duplicate event before it spends an ffprobe run on it. */
+    @Transactional(readOnly = true)
+    public boolean isAwaitingPlanning(long videoId) {
+        return videos.findById(videoId).map(v -> v.getStatus() == VideoStatus.UPLOADED).orElse(false);
+    }
+
     /**
-     * Job planner: UPLOADED → PROCESSING, one PENDING variant row and one job per resolution, each job to its own
-     * resolution topic. The jobs go through the outbox too, so they exist if and only if the status change committed.
+     * Job planner: UPLOADED → PROCESSING, one variant row per configured resolution and one job per variant worth
+     * encoding, each job to its own resolution topic. Renditions larger than the source are SKIPPED (no upscaling).
+     * The jobs go through the outbox too, so they exist if and only if the status change committed.
+     *
+     * @param source what ffprobe found; empty if the source was not probed (then every resolution is encoded)
      */
     @Transactional
-    public void planJobs(VideoUploadedEvent event) {
+    public void planJobs(VideoUploadedEvent event, Optional<SourceInfo> source) {
         long videoId = event.videoId();
-        if (videos.transition(videoId, VideoStatus.UPLOADED, VideoStatus.PROCESSING, Instant.now()) == 0) {
+        Instant now = Instant.now();
+        if (videos.transition(videoId, VideoStatus.UPLOADED, VideoStatus.PROCESSING, now) == 0) {
             log.debug("Video {} already planned, duplicate event ignored", videoId);
             return;
         }
+        source.ifPresent(s -> videos.recordSource(videoId, s.width(), s.height(), s.durationMs(), now));
+        Resolution lowest = properties.lowestPlanned();
         for (Resolution resolution : properties.resolutions()) {
+            if (source.isPresent() && !source.get().worthEncoding(resolution, lowest)) {
+                variants.insertSkipped(videoId, resolution);
+                continue;
+            }
             variants.insertPending(videoId, resolution);
             outbox.append(videoId, TranscodeRequestedEvent.TYPE, resolution.topic(), String.valueOf(videoId),
-                    new TranscodeRequestedEvent(videoId, resolution, event.originalS3Key()));
+                    new TranscodeRequestedEvent(videoId, resolution, event.originalS3Key(),
+                            source.map(SourceInfo::width).orElse(null),
+                            source.map(SourceInfo::height).orElse(null),
+                            source.map(SourceInfo::hasAudio).orElse(null)));
         }
     }
 
-    /** @return false if the job is a duplicate (variant already COMPLETED or FAILED): the worker skips it */
+    /** The upload is not a readable video: nothing to encode, retrying cannot help. */
+    @Transactional
+    public void rejectSource(long videoId, String reason) {
+        if (videos.transition(videoId, VideoStatus.UPLOADED, VideoStatus.PROCESSING_FAILED, Instant.now()) == 1) {
+            log.warn("Video {} rejected: {}", videoId, reason);
+        }
+    }
+
+    /** @return false if the job is a duplicate (variant already final): the worker skips it */
     @Transactional
     public boolean claimVariant(long videoId, Resolution resolution) {
         return variants.claim(videoId, resolution);
@@ -70,17 +100,14 @@ public class ProcessingService {
      * FULLY_PROCESSED is not missed. The status is PLAYABLE only after the manifest that lists the variant exists.
      */
     @Transactional
-    public void completeVariant(long videoId, Resolution resolution, String playlistKey) {
+    public void completeVariant(long videoId, Resolution resolution, Rendition rendition) {
         videos.lockById(videoId);
-        if (variants.markCompleted(videoId, resolution, playlistKey) == 0) {
+        if (variants.markCompleted(videoId, resolution, rendition) == 0) {
             log.debug("Variant {} of video {} already completed, duplicate ignored", resolution.label(), videoId);
             return;
         }
         List<Variant> all = variants.findByVideo(videoId);
-        List<Resolution> completed = all.stream()
-                .filter(v -> v.status() == VariantStatus.COMPLETED)
-                .map(Variant::resolution)
-                .toList();
+        List<Variant> completed = all.stream().filter(v -> v.status() == VariantStatus.COMPLETED).toList();
         // Written while the row lock is held, so two writers cannot leave an older list as the last version.
         // Trade-off: a slow S3 PUT holds the lock and a connection. If the commit then fails, the manifest lists a
         // rendition that exists but is not yet COMPLETED in the DB; the job is redelivered and repairs it.

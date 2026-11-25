@@ -3,17 +3,21 @@ package az.youtube.config;
 import az.youtube.dto.event.TranscodeRequestedEvent;
 import az.youtube.messaging.Topics;
 import az.youtube.service.ProcessingService;
+import az.youtube.worker.TranscodeWorker;
 
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.NestedExceptionUtils;
+import org.springframework.kafka.config.ContainerCustomizer;
 import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.kafka.core.KafkaOperations;
+import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
@@ -46,6 +50,22 @@ public class KafkaConfig {
 
     private static NewTopic topic(String name) {
         return TopicBuilder.name(name).partitions(PARTITIONS).replicas(1).build();
+    }
+
+    /**
+     * A real 4K encode can take far longer than Kafka's default {@code max.poll.interval.ms} (5 min). A consumer that
+     * does not poll within it is thrown out of its group and its job is handed to another worker while the first one
+     * is still encoding. So each worker pool gets {@code job-timeout + transfer-allowance} of its resolution: the
+     * encoder is killed at {@code job-timeout}, so the job always ends (and the thread polls again) before Kafka
+     * gives up on it. A job is redelivered only when its worker really died.
+     */
+    @Bean
+    public ContainerCustomizer<Object, Object, ConcurrentMessageListenerContainer<Object, Object>>
+            transcoderPollInterval(TranscodingProperties properties) {
+        return container -> TranscodeWorker.resolutionOfListener(container.getListenerId()).ifPresent(resolution ->
+                container.getContainerProperties().getKafkaConsumerProperties().setProperty(
+                        ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG,
+                        String.valueOf(properties.maxPollInterval(resolution).toMillis())));
     }
 
     /**
